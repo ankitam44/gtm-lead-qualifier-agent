@@ -1,71 +1,111 @@
 """Lead qualification / account research agent.
 
-Given a target account (raw firmographic + intent signals), scores ICP fit
-and produces AE-ready talking points using Claude's structured outputs.
+Given a target account (name + domain), the agent researches it itself using
+Claude's web search tool, then scores ICP fit and produces AE-ready talking
+points as validated structured output.
 """
 
+import json
 from typing import List, Literal
 
 import anthropic
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 MODEL = "claude-opus-5"
 
 SYSTEM_PROMPT = """You are a GTM/sales-ops analyst at an enterprise SaaS company. \
-You score inbound and outbound target accounts against our ICP rubric and hand \
-the output to an Account Executive who has never researched this company before.
+You research and score inbound and outbound target accounts against our ICP rubric, \
+then hand the output to an Account Executive who has never researched this company \
+before.
+
+Research the account using web search before scoring it. Look for: company size / \
+employee count, industry, recent funding, hiring trends (especially RevOps, IT, \
+Engineering leadership roles), leadership changes, news, and any public evidence of \
+a pain point our product would solve. Use a handful of targeted searches (company \
+name plus "funding", "careers", "employees", recent news) rather than one vague query.
 
 ICP rubric (weight roughly evenly, but use judgment):
 - Company size / employee count fit for enterprise SaaS (200+ employees is a good fit; \
   under 50 is a poor fit unless there are strong growth signals)
 - Industry / vertical fit
-- Buying signals: recent funding, hiring surges in relevant roles (e.g. RevOps, IT, \
-  Engineering leadership), tech stack mentions that suggest a gap our product fills
+- Buying signals: recent funding, hiring surges in relevant roles, tech stack mentions \
+  that suggest a gap our product fills
 - Evidence of active pain (news, job postings describing a problem we solve, \
   leadership quotes, product reviews)
 - Timing signals (funding round, new exec hire, expansion, M&A)
 
-Be skeptical. If the input signals are thin, say so and lower the score rather than \
-inventing evidence. Never fabricate facts not present in the provided signals."""
+Be skeptical. If your searches turn up thin or ambiguous evidence, say so and lower the \
+score rather than inventing evidence. Never fabricate a fact you did not find via search. \
+Once your research is sufficient, respond with the final JSON assessment and nothing else."""
+
+OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "fit_score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "tier": {"type": "string", "enum": ["A", "B", "C", "D"]},
+        "reasoning": {"type": "string"},
+        "buying_signals": {"type": "array", "items": {"type": "string"}},
+        "risks": {"type": "array", "items": {"type": "string"}},
+        "recommended_talking_points": {"type": "array", "items": {"type": "string"}},
+        "recommended_next_action": {"type": "string"},
+        "sources": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "URLs of the sources actually used, if any were found",
+        },
+    },
+    "required": [
+        "fit_score",
+        "tier",
+        "reasoning",
+        "buying_signals",
+        "risks",
+        "recommended_talking_points",
+        "recommended_next_action",
+        "sources",
+    ],
+    "additionalProperties": False,
+}
 
 
 class ICPAssessment(BaseModel):
-    fit_score: int = Field(ge=0, le=100, description="Overall ICP fit, 0-100")
-    tier: Literal["A", "B", "C", "D"] = Field(
-        description="A = prioritize now, B = qualified nurture, C = long-shot, D = disqualify"
-    )
-    reasoning: str = Field(description="2-4 sentence justification for the score")
-    buying_signals: List[str] = Field(description="Concrete signals found in the input")
-    risks: List[str] = Field(description="Reasons this account might not close or isn't a fit")
-    recommended_talking_points: List[str] = Field(
-        description="Specific, evidence-based talking points an AE can open with"
-    )
-    recommended_next_action: str = Field(
-        description="One concrete next step, e.g. 'Route to AE for outbound this week'"
-    )
+    fit_score: int = Field(ge=0, le=100)
+    tier: Literal["A", "B", "C", "D"]
+    reasoning: str
+    buying_signals: List[str]
+    risks: List[str]
+    recommended_talking_points: List[str]
+    recommended_next_action: str
+    sources: List[str]
 
 
 def assess_account(
     account_name: str,
     domain: str,
-    raw_signals: str,
     client: anthropic.Anthropic | None = None,
 ) -> ICPAssessment:
     client = client or anthropic.Anthropic()
 
-    user_content = (
-        f"Account: {account_name}\n"
-        f"Domain: {domain}\n\n"
-        f"Raw signals (news, job postings, firmographics, tech stack, funding, etc.):\n"
-        f"{raw_signals.strip() or '(none provided)'}"
-    )
+    user_content = f"Research and score this account.\nCompany: {account_name}\nDomain: {domain}"
 
-    response = client.messages.parse(
+    response = client.messages.create(
         model=MODEL,
-        max_tokens=2048,
+        max_tokens=8000,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_content}],
-        output_format=ICPAssessment,
+        tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 6}],
+        output_config={"format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}},
     )
 
-    return response.parsed_output
+    text_blocks = [b.text for b in response.content if b.type == "text"]
+    if not text_blocks:
+        raise RuntimeError(
+            f"No text response returned (stop_reason={response.stop_reason}); "
+            "the model may have stopped mid-search."
+        )
+
+    try:
+        data = json.loads(text_blocks[-1])
+        return ICPAssessment.model_validate(data)
+    except (json.JSONDecodeError, ValidationError) as e:
+        raise RuntimeError(f"Model output did not match the expected schema: {e}") from e

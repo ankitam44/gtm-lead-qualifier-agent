@@ -3,14 +3,14 @@ import os
 import streamlit as st
 
 from agent import assess_account
-from sample_accounts import SAMPLE_ACCOUNTS
 
 st.set_page_config(page_title="Lead Qualifier Agent", page_icon="🎯", layout="centered")
 
 st.title("🎯 Lead Qualification Agent")
 st.caption(
-    "Enterprise SaaS GTM demo — scores a target account against an ICP rubric and "
-    "produces AE-ready talking points. Built with the Claude API (structured outputs)."
+    "Enterprise SaaS GTM demo — researches a target account on the web, scores it "
+    "against an ICP rubric, and produces AE-ready talking points. Built with the "
+    "Claude API (web search + structured outputs)."
 )
 
 if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -21,31 +21,28 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
     )
 
 with st.sidebar:
-    st.subheader("Demo accounts")
-    st.write("Enrichment normally comes from Clearbit/LinkedIn/Crunchbase-style APIs. "
-             "For this demo, pick a mock account or paste your own signals.")
-    chosen = st.selectbox("Load a sample account", ["(none)"] + list(SAMPLE_ACCOUNTS.keys()))
+    st.subheader("Try a sample account")
+    st.write("These are real companies — the agent will actually search the web for them.")
+    sample = st.selectbox(
+        "Load a sample",
+        ["(none)", "Stripe", "Notion", "A small local business you know"],
+    )
 
-default_name = ""
-default_domain = ""
-default_signals = ""
-if chosen != "(none)":
-    default_name = chosen
-    default_domain = SAMPLE_ACCOUNTS[chosen]["domain"]
-    default_signals = SAMPLE_ACCOUNTS[chosen]["raw_signals"]
+default_name = "" if sample in ("(none)", "A small local business you know") else sample
+default_domain = {"Stripe": "stripe.com", "Notion": "notion.so"}.get(sample, "")
 
-account_name = st.text_input("Account name", value=default_name)
-domain = st.text_input("Domain", value=default_domain)
-raw_signals = st.text_area(
-    "Raw signals (news, job postings, firmographics, tech stack, funding...)",
-    value=default_signals,
-    height=220,
+account_name = st.text_input("Company name", value=default_name, placeholder="e.g. Acme Corp")
+domain = st.text_input("Domain", value=default_domain, placeholder="e.g. acme.com")
+
+st.caption(
+    "The agent searches the web itself for funding, hiring, and news signals — "
+    "you don't need to paste anything in."
 )
 
-if st.button("Assess account", type="primary", disabled=not account_name):
-    with st.spinner("Scoring account against ICP rubric..."):
+if st.button("Research & assess", type="primary", disabled=not account_name):
+    with st.spinner("Searching the web and scoring against ICP rubric... (~10-20s)"):
         try:
-            result = assess_account(account_name, domain, raw_signals)
+            result = assess_account(account_name, domain)
         except Exception as e:
             st.error(f"Request failed: {e}")
             st.stop()
@@ -75,3 +72,8 @@ if st.button("Assess account", type="primary", disabled=not account_name):
 
     st.markdown("**Recommended next action**")
     st.info(result.recommended_next_action)
+
+    if result.sources:
+        st.markdown("**Sources**")
+        for src in result.sources:
+            st.markdown(f"- {src}")
