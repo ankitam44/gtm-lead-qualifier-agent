@@ -41,7 +41,10 @@ Once your research is sufficient, respond with the final JSON assessment and not
 OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
-        "fit_score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "fit_score": {
+            "type": "integer",
+            "description": "Overall ICP fit, an integer from 0 to 100 inclusive",
+        },
         "tier": {"type": "string", "enum": ["A", "B", "C", "D"]},
         "reasoning": {"type": "string"},
         "buying_signals": {"type": "array", "items": {"type": "string"}},
@@ -106,6 +109,10 @@ def assess_account(
 
     try:
         data = json.loads(text_blocks[-1])
+        # The schema can't enforce numeric bounds server-side; clamp defensively
+        # rather than hard-failing on an off-by-a-little score.
+        if isinstance(data.get("fit_score"), int):
+            data["fit_score"] = max(0, min(100, data["fit_score"]))
         return ICPAssessment.model_validate(data)
     except (json.JSONDecodeError, ValidationError) as e:
         raise RuntimeError(f"Model output did not match the expected schema: {e}") from e
